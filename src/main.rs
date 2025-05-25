@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
 use std::{io::stdin, process::Command};
 use windows::{Win32::System::Com::*, Win32::UI::Shell::*, core::*};
 
@@ -28,13 +27,14 @@ struct Wallpaper {
 #[derive(Serialize, Deserialize, Debug)]
 struct Workspace {
     index: usize,
-    wallpapers: Option<Vec<Wallpaper>>,
+    wallpapers: Vec<Wallpaper>,
     interval: Option<usize>,
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct Monitor {
     workspaces: Option<Vec<Workspace>>,
     wallpapers: Option<Vec<Wallpaper>>,
+    interval: Option<usize>,
     interval: Option<usize>,
     enable: Option<bool>,
 }
@@ -48,62 +48,37 @@ struct Config {
 
 #[derive(Clone, Debug)]
 struct Timer {
-    interval: Duration,
-    next: Instant,
+    interval: usize,
+    elapsed: usize,
 }
 
 impl Timer {
     fn new(interval: usize) -> Timer {
-        Timer {
-            interval: Duration::from_secs(interval.try_into().unwrap()),
-            next: Instant::now() + Duration::from_secs(interval.try_into().unwrap()),
-        }
-    }
-
-    fn check_and_reset(&mut self) -> bool {
-        let now = Instant::now();
-        if now >= self.next {
-            self.next = now + self.interval;
-            true
-        } else {
-            false
-        }
+        return Timer {
+            interval: interval,
+            elapsed: 0,
+        };
     }
 }
 
 #[derive(Clone, Debug)]
 struct WorkspaceState {
     wallpaper_idx: usize,
-    wallpapers: Vec<Wallpaper>,
-    timer: Option<Timer>,
-}
-impl WorkspaceState {
-    fn new() -> Self {
-        Self {
-            wallpaper_idx: 0,
-            wallpapers: Vec::new(),
-            timer: None,
-        }
-    }
+    timer: Timer,
 }
 
 #[derive(Clone, Debug)]
 struct MonitorState {
     workspaces: Vec<WorkspaceState>,
-}
-impl MonitorState {
-    fn new() -> Self {
-        Self {
-            workspaces: Vec::new(),
-        }
-    }
+    wallpaper_idx: usize,
+    timer: Timer,
 }
 
 #[derive(Clone, Debug)]
 struct PaperState {
     active_workspaces: Vec<usize>,
     monitors: Vec<MonitorState>,
-    we_path: Option<String>,
+    timer: Timer,
 }
 
 impl PaperState {
@@ -111,20 +86,18 @@ impl PaperState {
         PaperState {
             active_workspaces: Vec::new(),
             monitors: Vec::new(),
-            we_path: None,
+            timer: Timer {
+                interval: 0,
+                elapsed: 0,
+            },
         }
     }
 }
 
 #[derive(Debug)]
 enum Event {
-    SocketEvent {
-        notification: Notification,
-    },
-    TimerEvent {
-        monitor_idx: usize,
-        workspace_idx: usize,
-    },
+    SocketEvent { notification: Notification },
+    TimerEvent { monitor: usize, workspace: usize },
 }
 
 const NAME: &str = "komopaper.sock";
@@ -143,44 +116,28 @@ fn main() -> anyhow::Result<()> {
         paper_state
             .active_workspaces
             .push(monitor.focused_workspace_idx());
-        let monitor_state = MonitorState::new();
-        paper_state.monitors.push(monitor_state);
-        for (workspace_index, workspace) in monitor.workspaces.elements().iter().enumerate() {
-            let mut workspace_state = WorkspaceState::new();
-            let timer;
-            match &config.monitors[monitor_index].workspaces {
-                Some(workspaces) => {
-                    let workspace_config = &workspaces[workspace_index];
-                    let interval = workspace_config
-                        .interval
-                        .or(config.monitors[monitor_index].interval)
-                        .or(config.interval);
-                    timer = interval.map(|interval| Timer::new(interval));
-                    if let Some(workspace_wallpapers) = &workspace_config.wallpapers {
-                        workspace_state.wallpapers = workspace_wallpapers.clone();
-                    } else if let Some(monitor_wallpapers) =
-                        &config.monitors[monitor_index].wallpapers
-                    {
-                        workspace_state.wallpapers = monitor_wallpapers.clone();
-                    } else if let Some(global_wallpapers) = &config.wallpapers {
-                        workspace_state.wallpapers = global_wallpapers.clone();
-                    }
-                }
-                None => {
-                    let interval = config.monitors[monitor_index].interval.or(config.interval);
-                    timer = interval.map(|interval| Timer::new(interval));
-                    if let Some(monitor_wallpapers) = &config.monitors[monitor_index].wallpapers {
-                        workspace_state.wallpapers = monitor_wallpapers.clone();
-                    } else if let Some(global_wallpapers) = &config.wallpapers {
-                        workspace_state.wallpapers = global_wallpapers.clone();
-                    }
+        set_wallpaper(&config, index, monitor.focused_workspace_idx());
+        let mut workspace_states: Vec<WorkspaceState> = Vec::new();
+        match &config.monitors[index].workspaces {
+            Some(workspaces) => {
+                for workspace in workspaces {
+                    let interval = workspace.interval.unwrap_or(0);
+                    let workspace_state = WorkspaceState {
+                        wallpaper_idx: 0,
+                        timer: Timer::new(interval),
+                    };
+                    workspace_states.push(workspace_state);
                 }
             }
-            workspace_state.timer = timer;
-            paper_state.monitors[monitor_index]
-                .workspaces
-                .push(workspace_state);
+            None => {}
         }
+        let interval = config.monitors[index].interval.unwrap_or(0);
+        let monitor_state = MonitorState {
+            workspaces: workspace_states,
+            wallpaper_idx: 0,
+            timer: Timer::new(interval),
+        };
+        paper_state.monitors.push(monitor_state);
     }
     println!("{:#?}", paper_state);
 
@@ -220,26 +177,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
     });
-    let mut timer_state = paper_state.clone();
-    thread::spawn(move || {
-        loop {
-            for (monitor_index, monitor) in timer_state.monitors.iter_mut().enumerate() {
-                for (workspace_index, workspace) in monitor.workspaces.iter_mut().enumerate() {
-                    if let Some(ref mut timer) = workspace.timer {
-                        if timer.check_and_reset() {
-                            if let Err(send_error) = tx_timer.send(Event::TimerEvent {
-                                monitor_idx: monitor_index,
-                                workspace_idx: workspace_index,
-                            }) {
-                                println!("failed to send notification: {send_error}");
-                            }
-                        }
-                    }
-                }
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
+    let timer_state = paper_state.clone();
+    thread::spawn(move || loop {});
 
     for event in rx {
         match event {
@@ -251,32 +190,16 @@ fn main() -> anyhow::Result<()> {
                     .focused()
                     .unwrap()
                     .focused_workspace_idx();
+                println!("{:#?}", paper_state.active_workspaces);
                 if paper_state.active_workspaces[focused_monitor_idx] != focused_workspace_idx {
                     paper_state.active_workspaces[focused_monitor_idx] = focused_workspace_idx;
-                    set_wallpaper(&paper_state, focused_monitor_idx, focused_workspace_idx);
+                    set_wallpaper(&config, focused_monitor_idx, focused_workspace_idx);
                 }
             }
-            Event::TimerEvent {
-                monitor_idx,
-                workspace_idx,
-            } => {
-                let workspace = &mut paper_state.monitors[monitor_idx].workspaces[workspace_idx];
-                if workspace.wallpapers.len() == 0 {
-                    continue;
-                }
-                let wallpapers_len = workspace.wallpapers.len();
-
-                let old_wallpaper_idx = workspace.wallpaper_idx;
-                workspace.wallpaper_idx = (workspace.wallpaper_idx + 1) % wallpapers_len;
-                println!("{:#?}", workspace.wallpaper_idx);
-                if paper_state.active_workspaces[monitor_idx] == workspace_idx
-                    && old_wallpaper_idx != workspace.wallpaper_idx
-                {
-                    set_wallpaper(&paper_state, monitor_idx, workspace_idx);
-                }
+            Event::TimerEvent { monitor, workspace } => {
+                println!("{monitor}, {workspace}");
             }
         }
-        println!("{:#?}", paper_state.active_workspaces);
     }
 
     Ok(())
