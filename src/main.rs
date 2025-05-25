@@ -81,26 +81,6 @@ fn main() -> anyhow::Result<()> {
                             continue;
                         }
                     };
-                    match notification.event {
-                        NotificationEvent::WindowManager(WindowManagerEvent::FocusChange(
-                            event,
-                            window,
-                        ))
-                        | NotificationEvent::WindowManager(WindowManagerEvent::Cloak(
-                            event,
-                            window,
-                        ))
-                        | NotificationEvent::WindowManager(WindowManagerEvent::Uncloak(
-                            event,
-                            window,
-                        )) => {
-                            // println!("Focus changed! :)");
-                        }
-                        _ => {
-                            // println!("{:#?}", notification.event);
-                            continue;
-                        }
-                    }
                     let focused_monitor_idx = notification.state.monitors.focused_idx();
                     let focused_workspace_idx = notification
                         .state
