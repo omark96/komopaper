@@ -10,7 +10,8 @@
                             "path": "C:/Users/ollem/Pictures/wallpaper/wp1.jpg",
                             "kind": "Windows"
                         }
-                    ]
+                    ],
+                    "interval": 50
                 },
                 {
                     "index": 1,
@@ -34,8 +35,8 @@
                     "index": 3,
                     "wallpapers": [
                         {
-                            "path": "C:/Users/ollem/Pictures/wallpaper/wp4.jpg",
-                            "kind": "Windows"
+                            "path": "C:/Program Files (x86)/Steam/steamapps/common/wallpaper_engine/projects/defaultprojects/shimmering_particles/project.json",
+                            "kind": "WallpaperEngine"
                         }
                     ]
                 },
@@ -49,7 +50,8 @@
                     ]
                 }
             ],
-            "enable": true
+            "enable": true,
+            "interval": 100
         }
     ],
     "we_path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper64.exe"

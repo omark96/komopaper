@@ -9,6 +9,8 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread;
 use std::{io::stdin, process::Command};
 use windows::{Win32::System::Com::*, Win32::UI::Shell::*, core::*};
 
@@ -26,29 +28,74 @@ struct Wallpaper {
 struct Workspace {
     index: usize,
     wallpapers: Vec<Wallpaper>,
+    interval: Option<usize>,
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct Monitor {
     workspaces: Option<Vec<Workspace>>,
     wallpapers: Option<Vec<Wallpaper>>,
+    interval: Option<usize>,
     enable: Option<bool>,
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct Config {
     monitors: Vec<Monitor>,
     we_path: Option<String>,
+    interval: Option<usize>,
 }
-#[derive(Debug)]
+
+#[derive(Clone, Debug)]
+struct Timer {
+    interval: usize,
+    elapsed: usize,
+}
+
+impl Timer {
+    fn new(interval: usize) -> Timer {
+        return Timer {
+            interval: interval,
+            elapsed: 0,
+        };
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceState {
+    wallpaper_idx: usize,
+    timer: Timer,
+}
+
+#[derive(Clone, Debug)]
+struct MonitorState {
+    workspaces: Vec<WorkspaceState>,
+    wallpaper_idx: usize,
+    timer: Timer,
+}
+
+#[derive(Clone, Debug)]
 struct PaperState {
     active_workspaces: Vec<usize>,
+    monitors: Vec<MonitorState>,
+    timer: Timer,
 }
 
 impl PaperState {
     fn new() -> PaperState {
         PaperState {
             active_workspaces: Vec::new(),
+            monitors: Vec::new(),
+            timer: Timer {
+                interval: 0,
+                elapsed: 0,
+            },
         }
     }
+}
+
+#[derive(Debug)]
+enum Event {
+    SocketEvent { notification: Notification },
+    TimerEvent { monitor: usize, workspace: usize },
 }
 
 const NAME: &str = "komopaper.sock";
@@ -67,39 +114,91 @@ fn main() -> anyhow::Result<()> {
             .active_workspaces
             .push(monitor.focused_workspace_idx());
         set_wallpaper(&config, index, monitor.focused_workspace_idx());
+        let mut workspace_states: Vec<WorkspaceState> = Vec::new();
+        match &config.monitors[index].workspaces {
+            Some(workspaces) => {
+                for workspace in workspaces {
+                    let interval = workspace.interval.unwrap_or(0);
+                    let workspace_state = WorkspaceState {
+                        wallpaper_idx: 0,
+                        timer: Timer::new(interval),
+                    };
+                    workspace_states.push(workspace_state);
+                }
+            }
+            None => {}
+        }
+        let interval = config.monitors[index].interval.unwrap_or(0);
+        let monitor_state = MonitorState {
+            workspaces: workspace_states,
+            wallpaper_idx: 0,
+            timer: Timer::new(interval),
+        };
+        paper_state.monitors.push(monitor_state);
     }
-    for incoming in socket.incoming() {
-        match incoming {
-            Ok(data) => {
-                let reader = BufReader::new(data.try_clone()?);
+    println!("{:#?}", paper_state);
 
-                for line in reader.lines().flatten() {
-                    let notification: Notification = match serde_json::from_str(&line) {
-                        Ok(notification) => notification,
+    let (tx_timer, rx) = mpsc::channel();
+
+    let tx_socket = tx_timer.clone();
+
+    thread::spawn(move || {
+        for incoming in socket.incoming() {
+            match incoming {
+                Ok(data) => {
+                    let reader = match data.try_clone() {
+                        Ok(cloned_data) => BufReader::new(cloned_data),
                         Err(error) => {
-                            println!("discarding malformed komorebi notification: {error}");
+                            println!("Failed to clone data: {error}");
                             continue;
                         }
                     };
-                    let focused_monitor_idx = notification.state.monitors.focused_idx();
-                    let focused_workspace_idx = notification
-                        .state
-                        .monitors
-                        .focused()
-                        .unwrap()
-                        .focused_workspace_idx();
-                    println!("{:#?}", paper_state.active_workspaces);
-                    if paper_state.active_workspaces[focused_monitor_idx] != focused_workspace_idx {
-                        paper_state.active_workspaces[focused_monitor_idx] = focused_workspace_idx;
-                        set_wallpaper(&config, focused_monitor_idx, focused_workspace_idx);
+
+                    for line in reader.lines().flatten() {
+                        let notification: Notification = match serde_json::from_str(&line) {
+                            Ok(notification) => notification,
+                            Err(error) => {
+                                println!("discarding malformed komorebi notification: {error}");
+                                continue;
+                            }
+                        };
+                        if let Err(send_error) = tx_socket.send(Event::SocketEvent { notification })
+                        {
+                            println!("failed to send notification: {send_error}");
+                        }
                     }
                 }
+                Err(error) => {
+                    println!("{error}");
+                }
             }
-            Err(error) => {
-                println!("{error}");
+        }
+    });
+    let timer_state = paper_state.clone();
+    thread::spawn(move || loop {});
+
+    for event in rx {
+        match event {
+            Event::SocketEvent { notification } => {
+                let focused_monitor_idx = notification.state.monitors.focused_idx();
+                let focused_workspace_idx = notification
+                    .state
+                    .monitors
+                    .focused()
+                    .unwrap()
+                    .focused_workspace_idx();
+                println!("{:#?}", paper_state.active_workspaces);
+                if paper_state.active_workspaces[focused_monitor_idx] != focused_workspace_idx {
+                    paper_state.active_workspaces[focused_monitor_idx] = focused_workspace_idx;
+                    set_wallpaper(&config, focused_monitor_idx, focused_workspace_idx);
+                }
+            }
+            Event::TimerEvent { monitor, workspace } => {
+                println!("{monitor}, {workspace}");
             }
         }
     }
+
     Ok(())
 }
 
