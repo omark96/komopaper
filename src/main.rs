@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::{io::stdin, process::Command};
 use windows::{Win32::System::Com::*, Win32::UI::Shell::*, core::*};
 
@@ -41,6 +43,14 @@ struct PaperState {
     active_workspaces: Vec<usize>,
 }
 
+impl PaperState {
+    fn new() -> PaperState {
+        PaperState {
+            active_workspaces: Vec::new(),
+        }
+    }
+}
+
 const NAME: &str = "komopaper.sock";
 
 fn main() -> anyhow::Result<()> {
@@ -48,9 +58,7 @@ fn main() -> anyhow::Result<()> {
     let json_data = fs::read_to_string("./config.json").expect("Failed to read config.json");
     let config: Config = serde_json::from_str(&json_data).expect("Failed to deserialize JSON");
 
-    let mut paper_state = PaperState {
-        active_workspaces: Vec::new(),
-    };
+    let mut paper_state = PaperState::new();
 
     let state_data = komorebi_client::send_query(&SocketMessage::State).unwrap();
     let state: State = serde_json::from_str(&state_data).expect("Failed to get state");
