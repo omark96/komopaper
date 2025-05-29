@@ -1,0 +1,56 @@
+{
+    "monitors": [
+        {},
+        {
+            "workspaces": [
+                {
+                    "index": 0,
+                    "wallpapers": [
+                        {
+                            "path": "C:/Users/ollem/Pictures/wallpaper/wp1.jpg",
+                            "kind": "Windows"
+                        }
+                    ]
+                },
+                {
+                    "index": 1,
+                    "wallpapers": [
+                        {
+                            "path": "C:/Users/ollem/Pictures/wallpaper/wp2.jpg",
+                            "kind": "Windows"
+                        }
+                    ]
+                },
+                {
+                    "index": 2,
+                    "wallpapers": [
+                        {
+                            "path": "C:/Program Files (x86)/Steam/steamapps/workshop/content/431960/1888636115/project.json",
+                            "kind": "WallpaperEngine"
+                        }
+                    ]
+                },
+                {
+                    "index": 3,
+                    "wallpapers": [
+                        {
+                            "path": "C:/Users/ollem/Pictures/wallpaper/wp4.jpg",
+                            "kind": "Windows"
+                        }
+                    ]
+                },
+                {
+                    "index": 4,
+                    "wallpapers": [
+                        {
+                            "path": "C:/Users/ollem/Pictures/wallpaper/wp5.jpg",
+                            "kind": "Windows"
+                        }
+                    ]
+                }
+            ],
+            "enable": true
+        }
+    ],
+    "we_path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper64.exe"
+}
