@@ -1,18 +1,14 @@
 use komorebi_client::Notification;
-use komorebi_client::NotificationEvent;
 use komorebi_client::SocketMessage;
 use komorebi_client::State;
-use komorebi_client::WindowManagerEvent;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{io::stdin, process::Command};
 use windows::{Win32::System::Com::*, Win32::UI::Shell::*, core::*};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -35,7 +31,6 @@ struct Workspace {
 struct Monitor {
     workspaces: Option<Vec<Workspace>>,
     wallpapers: Option<Vec<Wallpaper>>,
-    interval: Option<usize>,
     interval: Option<usize>,
     enable: Option<bool>,
 }
@@ -146,7 +141,7 @@ fn main() -> anyhow::Result<()> {
             .push(monitor.focused_workspace_idx());
         let monitor_state = MonitorState::new();
         paper_state.monitors.push(monitor_state);
-        for (workspace_index, workspace) in monitor.workspaces.elements().iter().enumerate() {
+        for (workspace_index, _workspace) in monitor.workspaces.elements().iter().enumerate() {
             let mut workspace_state = WorkspaceState::new();
             let timer;
             match &config.monitors[monitor_index].workspaces {
@@ -293,10 +288,7 @@ fn set_wallpaper(paper_state: &PaperState, monitor_index: usize, workspace_index
         match wallpaper.kind {
             Some(WallpaperType::Windows) | None => {
                 if let Some(we_path) = &paper_state.we_path {
-                    close_we_wallpaper(
-                        paper_state.we_path.clone().unwrap(),
-                        monitor_index.try_into().unwrap(),
-                    );
+                    close_we_wallpaper(we_path.clone(), monitor_index.try_into().unwrap());
                 }
                 set_win_wallpaper(wallpaper, monitor_index.try_into().unwrap());
             }
