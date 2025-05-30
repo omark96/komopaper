@@ -1,6 +1,7 @@
 use komorebi_client::Notification;
 use komorebi_client::SocketMessage;
 use komorebi_client::State;
+use komorebi_client::UnixListener;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
@@ -130,11 +131,125 @@ fn main() -> anyhow::Result<()> {
     let json_data = fs::read_to_string("./config.json").expect("Failed to read config.json");
     let config: Config = serde_json::from_str(&json_data).expect("Failed to deserialize JSON");
 
-    let mut paper_state = PaperState::new();
-
     let state_data = komorebi_client::send_query(&SocketMessage::State).unwrap();
     let state: State = serde_json::from_str(&state_data).expect("Failed to get state");
-    paper_state.we_path = config.we_path;
+    let mut paper_state = initialize_paper_state(&config, &state);
+
+    let (tx_timer, rx) = mpsc::channel();
+
+    let tx_socket = tx_timer.clone();
+    spawn_socket_thread(socket, tx_socket);
+
+    let timer_state = paper_state.clone();
+    spawn_timer_thread(timer_state, tx_timer);
+
+    for event in rx {
+        match event {
+            Event::SocketEvent { notification } => {
+                handle_socket_event(&mut paper_state, notification)
+            }
+            Event::TimerEvent {
+                monitor_idx,
+                workspace_idx,
+            } => handle_timer_event(&mut paper_state, monitor_idx, workspace_idx),
+        }
+        println!("{:#?}", paper_state.active_workspaces);
+    }
+
+    Ok(())
+}
+
+fn spawn_timer_thread(mut timer_state: PaperState, tx_timer: mpsc::Sender<Event>) {
+    thread::spawn(move || {
+        loop {
+            for (monitor_index, monitor) in timer_state.monitors.iter_mut().enumerate() {
+                for (workspace_index, workspace) in monitor.workspaces.iter_mut().enumerate() {
+                    if let Some(ref mut timer) = workspace.timer {
+                        if timer.check_and_reset() {
+                            if let Err(send_error) = tx_timer.send(Event::TimerEvent {
+                                monitor_idx: monitor_index,
+                                workspace_idx: workspace_index,
+                            }) {
+                                println!("failed to send notification: {send_error}");
+                            }
+                        }
+                    }
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+fn spawn_socket_thread(socket: UnixListener, tx_socket: mpsc::Sender<Event>) {
+    thread::spawn(move || {
+        for incoming in socket.incoming() {
+            match incoming {
+                Ok(data) => {
+                    let reader = match data.try_clone() {
+                        Ok(cloned_data) => BufReader::new(cloned_data),
+                        Err(error) => {
+                            println!("Failed to clone data: {error}");
+                            continue;
+                        }
+                    };
+
+                    for line in reader.lines().flatten() {
+                        let notification: Notification = match serde_json::from_str(&line) {
+                            Ok(notification) => notification,
+                            Err(error) => {
+                                println!("discarding malformed komorebi notification: {error}");
+                                continue;
+                            }
+                        };
+                        if let Err(send_error) = tx_socket.send(Event::SocketEvent { notification })
+                        {
+                            println!("failed to send notification: {send_error}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    println!("{error}");
+                }
+            }
+        }
+    });
+}
+
+fn handle_timer_event(paper_state: &mut PaperState, monitor_idx: usize, workspace_idx: usize) {
+    let workspace = &mut paper_state.monitors[monitor_idx].workspaces[workspace_idx];
+    if workspace.wallpapers.len() == 0 {
+        return;
+    }
+    let wallpapers_len = workspace.wallpapers.len();
+
+    let old_wallpaper_idx = workspace.wallpaper_idx;
+    workspace.wallpaper_idx = (workspace.wallpaper_idx + 1) % wallpapers_len;
+    println!("{:#?}", workspace.wallpaper_idx);
+    if paper_state.active_workspaces[monitor_idx] == workspace_idx
+        && old_wallpaper_idx != workspace.wallpaper_idx
+    {
+        set_wallpaper(&paper_state, monitor_idx, workspace_idx);
+    }
+}
+
+fn handle_socket_event(paper_state: &mut PaperState, notification: Notification) {
+    let focused_monitor_idx = notification.state.monitors.focused_idx();
+    let focused_workspace_idx = notification
+        .state
+        .monitors
+        .focused()
+        .unwrap()
+        .focused_workspace_idx();
+    if paper_state.active_workspaces[focused_monitor_idx] != focused_workspace_idx {
+        paper_state.active_workspaces[focused_monitor_idx] = focused_workspace_idx;
+        set_wallpaper(&paper_state, focused_monitor_idx, focused_workspace_idx);
+    }
+}
+
+fn initialize_paper_state(config: &Config, state: &State) -> PaperState {
+    let mut paper_state = PaperState::new();
+    paper_state.we_path = config.we_path.clone();
     for (monitor_index, monitor) in state.monitors.elements().iter().enumerate() {
         paper_state
             .active_workspaces
@@ -178,104 +293,7 @@ fn main() -> anyhow::Result<()> {
                 .push(workspace_state);
         }
     }
-    println!("{:#?}", paper_state);
-
-    let (tx_timer, rx) = mpsc::channel();
-
-    let tx_socket = tx_timer.clone();
-
-    thread::spawn(move || {
-        for incoming in socket.incoming() {
-            match incoming {
-                Ok(data) => {
-                    let reader = match data.try_clone() {
-                        Ok(cloned_data) => BufReader::new(cloned_data),
-                        Err(error) => {
-                            println!("Failed to clone data: {error}");
-                            continue;
-                        }
-                    };
-
-                    for line in reader.lines().flatten() {
-                        let notification: Notification = match serde_json::from_str(&line) {
-                            Ok(notification) => notification,
-                            Err(error) => {
-                                println!("discarding malformed komorebi notification: {error}");
-                                continue;
-                            }
-                        };
-                        if let Err(send_error) = tx_socket.send(Event::SocketEvent { notification })
-                        {
-                            println!("failed to send notification: {send_error}");
-                        }
-                    }
-                }
-                Err(error) => {
-                    println!("{error}");
-                }
-            }
-        }
-    });
-    let mut timer_state = paper_state.clone();
-    thread::spawn(move || {
-        loop {
-            for (monitor_index, monitor) in timer_state.monitors.iter_mut().enumerate() {
-                for (workspace_index, workspace) in monitor.workspaces.iter_mut().enumerate() {
-                    if let Some(ref mut timer) = workspace.timer {
-                        if timer.check_and_reset() {
-                            if let Err(send_error) = tx_timer.send(Event::TimerEvent {
-                                monitor_idx: monitor_index,
-                                workspace_idx: workspace_index,
-                            }) {
-                                println!("failed to send notification: {send_error}");
-                            }
-                        }
-                    }
-                }
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
-
-    for event in rx {
-        match event {
-            Event::SocketEvent { notification } => {
-                let focused_monitor_idx = notification.state.monitors.focused_idx();
-                let focused_workspace_idx = notification
-                    .state
-                    .monitors
-                    .focused()
-                    .unwrap()
-                    .focused_workspace_idx();
-                if paper_state.active_workspaces[focused_monitor_idx] != focused_workspace_idx {
-                    paper_state.active_workspaces[focused_monitor_idx] = focused_workspace_idx;
-                    set_wallpaper(&paper_state, focused_monitor_idx, focused_workspace_idx);
-                }
-            }
-            Event::TimerEvent {
-                monitor_idx,
-                workspace_idx,
-            } => {
-                let workspace = &mut paper_state.monitors[monitor_idx].workspaces[workspace_idx];
-                if workspace.wallpapers.len() == 0 {
-                    continue;
-                }
-                let wallpapers_len = workspace.wallpapers.len();
-
-                let old_wallpaper_idx = workspace.wallpaper_idx;
-                workspace.wallpaper_idx = (workspace.wallpaper_idx + 1) % wallpapers_len;
-                println!("{:#?}", workspace.wallpaper_idx);
-                if paper_state.active_workspaces[monitor_idx] == workspace_idx
-                    && old_wallpaper_idx != workspace.wallpaper_idx
-                {
-                    set_wallpaper(&paper_state, monitor_idx, workspace_idx);
-                }
-            }
-        }
-        println!("{:#?}", paper_state.active_workspaces);
-    }
-
-    Ok(())
+    return paper_state;
 }
 
 fn set_wallpaper(paper_state: &PaperState, monitor_index: usize, workspace_index: usize) {
