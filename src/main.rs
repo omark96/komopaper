@@ -1,7 +1,6 @@
 use komorebi_client::Notification;
 use komorebi_client::SocketMessage;
 use komorebi_client::State;
-use komorebi_client::UnixListener;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
@@ -127,7 +126,6 @@ enum Event {
 const NAME: &str = "komopaper.sock";
 
 fn main() -> anyhow::Result<()> {
-    let socket = komorebi_client::subscribe(NAME)?;
     let json_data = fs::read_to_string("./config.json").expect("Failed to read config.json");
     let config: Config = serde_json::from_str(&json_data).expect("Failed to deserialize JSON");
 
@@ -138,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     let (tx_timer, rx) = mpsc::channel();
 
     let tx_socket = tx_timer.clone();
-    spawn_socket_thread(socket, tx_socket);
+    spawn_socket_thread(tx_socket);
 
     let timer_state = paper_state.clone();
     spawn_timer_thread(timer_state, tx_timer);
@@ -181,7 +179,14 @@ fn spawn_timer_thread(mut timer_state: PaperState, tx_timer: mpsc::Sender<Event>
     });
 }
 
-fn spawn_socket_thread(socket: UnixListener, tx_socket: mpsc::Sender<Event>) {
+fn spawn_socket_thread(tx_socket: mpsc::Sender<Event>) {
+    let socket = match komorebi_client::subscribe(NAME) {
+        Ok(socket) => socket,
+        Err(error) => {
+            println!("Failed to subscribe: {error}");
+            return;
+        }
+    };
     thread::spawn(move || {
         for incoming in socket.incoming() {
             match incoming {
